@@ -1,6 +1,6 @@
 name: Opportunity Radar
 
-'on':
+on:
   workflow_dispatch:
   schedule:
     - cron: "0 */4 * * *"
@@ -13,288 +13,259 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Search public sources and send Telegram report
+      - name: खोज, हिंदी रिपोर्ट और Telegram
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
-          import os, json, urllib.request, urllib.parse, xml.etree.ElementTree as ET
-          import datetime, email.utils, html, re, time, base64
+          import os, re, json, time, html, urllib.parse, urllib.request, urllib.error
+          from datetime import datetime, timezone, timedelta
+          from email.utils import parsedate_to_datetime
+          from xml.etree import ElementTree as ET
 
-          TOKEN = os.environ.get("BOT_TOKEN", "")
-          CHAT = os.environ.get("CHAT_ID", "")
-          if not TOKEN or not CHAT:
-              raise RuntimeError("Telegram secrets missing: BOT_TOKEN or CHAT_ID")
+          BOT = os.environ["BOT_TOKEN"]
+          CHAT = os.environ["CHAT_ID"]
+          NOW = datetime.now(timezone.utc)
+          IST = timezone(timedelta(hours=5, minutes=30))
+          stamp = NOW.astimezone(IST).strftime("%d-%m-%Y %I:%M %p")
+          errors = []
 
-          IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
-          now = datetime.datetime.now(IST)
-          since = now.date() - datetime.timedelta(days=14)
-          errors, gh, hn, rss = [], {}, {}, {}
-          translation_cache = {}
-          translation_calls = 0
-
-          def fetch(url, headers=None, timeout=25):
+          def fetch(url, headers=None, timeout=18):
               req = urllib.request.Request(url, headers=headers or {"User-Agent":"OpportunityRadar/1.0"})
-              return urllib.request.urlopen(req, timeout=timeout).read()
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return r.read()
 
-          def clean(s):
-              return re.sub(r"\s+", " ", str(s or "")).strip()
+          def translate(text):
+              text = (text or "").strip()
+              if not text: return ""
+              # छोटा-छोटा अनुवाद; विफल होने पर मूल भाषा स्पष्ट रूप से चिह्नित।
+              chunks = [text[i:i+850] for i in range(0, min(len(text), 3000), 850)]
+              out = []
+              for chunk in chunks:
+                  try:
+                      url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=hi&dt=t&q=" + urllib.parse.quote(chunk)
+                      data = json.loads(fetch(url, timeout=12))
+                      out.append("".join(x[0] for x in data[0] if x and x[0]))
+                      time.sleep(.15)
+                  except Exception:
+                      out.append("मूल भाषा: " + chunk)
+              return " ".join(out)
 
-          def hi(text):
-              global translation_calls
-              text = clean(text)
-              if not text:
-                  return "जानकारी उपलब्ध नहीं"
-              if text in translation_cache:
-                  return translation_cache[text]
-              if translation_calls >= 90:
-                  translation_cache[text] = text
-                  return text
-              translation_calls += 1
+          def rss(query, limit=6):
+              url = "https://news.google.com/rss/search?q=" + urllib.parse.quote(query) + "&hl=en-IN&gl=IN&ceid=IN:en"
               try:
-                  url = "https://translate.googleapis.com/translate_a/single?" + urllib.parse.urlencode({"client":"gtx","sl":"auto","tl":"hi","dt":"t","q":text[:900]})
-                  data = json.loads(fetch(url, timeout=10))
-                  translated = "".join(part[0] for part in data[0] if part and part[0])
-                  translated = clean(translated) or text
-              except Exception:
-                  translated = text
-              translation_cache[text] = translated
-              return translated
-
-          def rss_search(query, max_items=8):
-              params = {"q":query,"hl":"en-IN","gl":"IN","ceid":"IN:en"}
-              url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
-              root = ET.fromstring(fetch(url))
-              out=[]
-              for item in root.findall(".//item"):
-                  title = html.unescape(re.sub("<[^>]+>","",item.findtext("title", ""))).strip()
-                  link = item.findtext("link", "").strip()
-                  pub = item.findtext("pubDate", "")
-                  if pub:
-                      try:
-                          pub_dt=email.utils.parsedate_to_datetime(pub)
-                          if pub_dt.date() < since:
-                              continue
-                      except Exception:
-                          pass
-                  desc=html.unescape(re.sub("<[^>]+>"," ",item.findtext("description", ""))).strip()
-                  if title and link:
-                      out.append({"title":title,"url":link,"date":pub,"desc":desc[:500]})
-                  if len(out)>=max_items: break
-              return out
-
-          # GitHub search: recent repositories across practical AI use cases
-          gh_queries = ["AI video tools", "AI video clipping", "open source AI agent", "AI cartoon video", "AI automation"]
-          for q in gh_queries:
-              try:
-                  query=q+" created:"+str(since)+".."+str(now.date())
-                  url="https://api.github.com/search/repositories?"+urllib.parse.urlencode({"q":query,"sort":"stars","order":"desc","per_page":5})
-                  data=json.loads(fetch(url,{"User-Agent":"OpportunityRadar","Accept":"application/vnd.github+json"}))
-                  for r in data.get("items",[]):
-                      link=r.get("html_url","")
-                      desc=(r.get("description") or "").strip()
-                      txt=(r.get("full_name","")+" "+desc).lower()
-                      if any(w in txt for w in ["crack","keygen","pirated","torrent","fake download"]): continue
-                      gh[link]={"name":r.get("full_name","?"),"stars":r.get("stargazers_count",0),"desc":desc,"url":link,"date":r.get("created_at","")[:10],"lang":r.get("language") or "Unknown","license":(r.get("license") or {}).get("spdx_id","Not specified")}
+                  root = ET.fromstring(fetch(url))
+                  items = []
+                  for it in root.findall(".//item")[:limit]:
+                      title = (it.findtext("title") or "").strip()
+                      link = (it.findtext("link") or "").strip()
+                      desc = re.sub("<[^>]+>", " ", it.findtext("description") or "")
+                      desc = html.unescape(re.sub(r"\s+", " ", desc)).strip()
+                      pub = it.findtext("pubDate") or ""
+                      items.append({"title":title, "link":link, "desc":desc, "date":pub})
+                  return items
               except Exception as e:
-                  errors.append("GitHub search: "+str(e)[:120])
+                  errors.append("RSS: " + str(e)[:140])
+                  return []
 
-          # Read accessible README and extract practical sections/requirements
-          def readme_details(project):
-              project["readme_steps"]="README में उपयोग/स्थापना के स्पष्ट निर्देश नहीं मिले; README लिंक खोलकर जाँचें।"
-              project["hw_doc"]="हार्डवेयर की आधिकारिक जानकारी उपलब्ध README में नहीं मिली।"
-              project["readme_url"]=""
+          def gh_search(q, n=5):
+              url = "https://api.github.com/search/repositories?q=" + urllib.parse.quote(q) + "&sort=updated&order=desc&per_page=" + str(n)
               try:
-                  owner,repo=project["name"].split("/",1)
-                  api="https://api.github.com/repos/"+owner+"/"+repo+"/readme"
-                  rd=json.loads(fetch(api,{"User-Agent":"OpportunityRadar","Accept":"application/vnd.github+json"}))
-                  raw=base64.b64decode(rd.get("content","")).decode("utf-8",errors="ignore")
-                  project["readme_url"]=rd.get("html_url",project["url"])
-                  lines=raw.splitlines()
-                  selected=[]; in_section=False; section_count=0
-                  for line in lines:
-                      if re.match(r"^#{1,3}\s+",line):
-                          heading=line.lower()
-                          if any(k in heading for k in ["install","setup","getting started","quick start","usage","requirements","hardware","prerequisite","features","run","download"]):
-                              in_section=True; section_count=0
-                              selected.append(line)
-                          else:
-                              in_section=False
-                      elif in_section and line.strip():
-                          selected.append(line)
-                          section_count+=1
-                          if section_count>=8: in_section=False
-                      if len(selected)>=24: break
-                  selected=[clean(x) for x in selected if clean(x) and not clean(x).startswith("<!--")]
-                  if selected:
-                      project["readme_steps"]=" | ".join(hi(x[:400]) for x in selected[:14])[:2200]
-                  hw=[clean(x) for x in lines if re.search(r"\b(ram|memory|vram|gpu|cuda|hardware|system requirements|minimum requirements|recommended requirements)\b",x,re.I) and len(clean(x))<300]
-                  if hw:
-                      project["hw_doc"]="README में दी जानकारी: "+" | ".join(hi(x) for x in hw[:4])
+                  data = json.loads(fetch(url, {"Accept":"application/vnd.github+json","User-Agent":"OpportunityRadar"}))
+                  return data.get("items", [])
+              except Exception as e:
+                  errors.append("GitHub: " + str(e)[:140])
+                  return []
+
+          def get_readme(repo):
+              try:
+                  url = repo.get("html_url","").replace("github.com/","raw.githubusercontent.com/") + "/HEAD/README.md"
+                  # Use GitHub API default branch rather than HEAD raw URL.
+                  branch = repo.get("default_branch") or "main"
+                  url = f"https://raw.githubusercontent.com/{repo['full_name']}/{branch}/README.md"
+                  return fetch(url).decode("utf-8","replace")[:16000]
               except Exception:
-                  pass
+                  return ""
 
-          gh_top=sorted(gh.values(),key=lambda x:x["stars"],reverse=True)[:5]
-          for p in gh_top: readme_details(p)
+          def readme_extract(md):
+              md = re.sub(r"!\[[^\]]*\]\([^)]+\)", "", md)
+              md = re.sub(r"<[^>]+>", " ", md)
+              md = re.sub(r"`{1,3}", "", md)
+              md = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", md)
+              lines = [re.sub(r"\s+"," ",x).strip() for x in md.splitlines()]
+              keys = ("install","installation","quick start","getting started","setup","usage","run","requirements","prerequisites","hardware","features","windows","linux","macos","docker","pip","npm","uv","first")
+              selected=[]
+              for i,line in enumerate(lines):
+                  if line and any(k in line.lower() for k in keys):
+                      for j in range(i, min(i+5,len(lines))):
+                          if lines[j] and lines[j] not in selected:
+                              selected.append(lines[j])
+              if not selected:
+                  selected=[x for x in lines[:30] if x]
+              # limit, remove repetitive junk
+              return " ".join(selected[:18])[:2200]
 
-          # Hacker News discussions
-          for q in ["AI video","AI tools","AI agent","open source AI","video clipping"]:
+          def when(pub):
               try:
-                  url="https://hn.algolia.com/api/v1/search_by_date?"+urllib.parse.urlencode({"query":q,"tags":"story","numericFilters":"created_at_i>"+str(int(datetime.datetime.combine(since,datetime.time(),tzinfo=IST).timestamp())),"hitsPerPage":10})
-                  data=json.loads(fetch(url))
-                  for h in data.get("hits",[]):
-                      title=h.get("title") or ""
-                      if not title: continue
-                      link=h.get("url") or ("https://news.ycombinator.com/item?id="+h.get("objectID",""))
-                      hn[h.get("objectID",link)]={"title":title,"points":h.get("points") or 0,"comments":h.get("num_comments") or 0,"url":link,"discussion":"https://news.ycombinator.com/item?id="+h.get("objectID","")}
-              except Exception as e: errors.append("Hacker News: "+str(e)[:120])
-          hn_top=sorted(hn.values(),key=lambda x:x["points"],reverse=True)[:4]
+                  dt=parsedate_to_datetime(pub).astimezone(IST)
+                  return dt.strftime("%d %b")
+              except Exception: return "तिथि उपलब्ध नहीं"
 
-          # Airdrop leads: directory/quest sources + X search snippets. Only active-task keywords retained.
-          airdrop_queries=[
-              "site:airdrops.io new airdrop testnet points campaign",
-              "site:galxe.com quest campaign points crypto",
-              "site:layer3.xyz crypto quests campaign",
-              "site:zealy.io crypto quest campaign",
-              "site:questn.com testnet quest campaign",
-              "site:x.com airdrop testnet points campaign official",
-              "site:x.com crypto testnet quest points airdrop"
+          def source_link(item):
+              link=item["link"]
+              # Google News RSS links often redirect; preserve link if cannot resolve.
+              try:
+                  req=urllib.request.Request(link, headers={"User-Agent":"Mozilla/5.0"})
+                  with urllib.request.urlopen(req, timeout=8) as r:
+                      final=r.geturl()
+                  return final
+              except Exception:
+                  return link
+
+          # GitHub project खोज: अलग-अलग श्रेणियाँ, डुप्लिकेट हटाएँ
+          queries=[
+            "AI video clipping shorts open source",
+            "AI agent automation tools open source",
+            "AI cartoon animation video open source",
+            "local AI agent desktop browser open source",
+            "Blender AI addon MCP open source",
+            "AI tools workflow automation open source"
           ]
-          airdrops=[]
-          for q in airdrop_queries:
+          repos={}
+          for q in queries:
+              for r in gh_search(q,4):
+                  repos[r["full_name"]]=r
+          recent=[]
+          cutoff=NOW-timedelta(days=21)
+          for r in repos.values():
               try:
-                  for item in rss_search(q,6):
-                      title=item["title"].lower()
-                      if not any(k in title for k in ["airdrop","testnet","points","quest","campaign","claim","reward"]): continue
-                      if item["url"] not in [x["url"] for x in airdrops]:
-                          item["search_query"]=q
-                          airdrops.append(item)
-              except Exception as e: errors.append("Airdrop search: "+str(e)[:100])
-          airdrops=airdrops[:6]
+                  dt=datetime.fromisoformat(r["updated_at"].replace("Z","+00:00"))
+                  if dt>=cutoff and not r.get("archived"): recent.append(r)
+              except: pass
+          recent.sort(key=lambda r:(r.get("stargazers_count",0),r.get("updated_at","")), reverse=True)
+          recent=recent[:5]
 
-          # X public-post discovery: search-indexed public posts only, not full X/API coverage.
+          def project_card(r):
+              readme=get_readme(r)
+              extract=readme_extract(readme)
+              desc=translate(r.get("description") or "विवरण उपलब्ध नहीं")
+              setup=translate(extract) if extract else "README से शुरुआती निर्देश नहीं मिले।"
+              lic=(r.get("license") or {}).get("spdx_id") or "लाइसेंस की पुष्टि नहीं"
+              lang=r.get("language") or "भाषा जानकारी नहीं"
+              stars=r.get("stargazers_count",0)
+              updated=r.get("updated_at","")[:10]
+              topics=", ".join(r.get("topics",[])[:5]) or "टॉपिक नहीं दिए"
+              # source clues, not a hardware benchmark
+              text=(readme+" "+r.get("description","")).lower()
+              hardware=[]
+              if any(x in text for x in ["gpu","cuda","nvidia","vram"]): hardware.append("GPU/VRAM का उल्लेख है; सटीक जरूरत README में जाँचें")
+              if any(x in text for x in ["local model","ollama","llama.cpp","local inference"]): hardware.append("स्थानीय AI मॉडल; RAM/GPU की जरूरत मॉडल के आकार पर निर्भर")
+              if any(x in text for x in ["docker","docker compose"]): hardware.append("Docker की जरूरत/विकल्प का उल्लेख")
+              if any(x in text for x in ["api key","api keys","bring your own key"]): hardware.append("संभवतः API key/भुगतान वाला मॉडल लग सकता है")
+              if any(x in text for x in ["free","open source"]): hardware.append("ओपन-सोर्स; सभी AI सेवाएँ जरूरी नहीं कि मुफ्त हों")
+              if not hardware: hardware=["हार्डवेयर/खर्च की स्पष्ट जानकारी नहीं मिली"]
+              return (f"🧰 <b>{html.escape(r['full_name'])}</b> ⭐ {stars:,}\n"
+                f"📅 अपडेट: {updated} | 💻 {html.escape(lang)} | 📜 {html.escape(lic)}\n"
+                f"📖 <b>क्या करता है:</b> {html.escape(desc[:650])}\n"
+                f"🎯 <b>कहाँ काम आ सकता है:</b> {html.escape(translate(topics))}\n"
+                f"🖥️ <b>कंप्यूटर/खर्च संकेत:</b> {html.escape(' • '.join(hardware))}\n"
+                f"🚀 <b>README से मिले शुरुआती निर्देश (सार/अनुवाद):</b>\n{html.escape(setup[:1100])}\n"
+                f"🔗 <a href='{html.escape(r['html_url'], quote=True)}'>GitHub खोलें</a>\n")
+
+          # X indexed post clues: restrict results to direct X links; no claim of full X access.
           x_queries=[
-              "site:x.com AI agent launch open source tool",
-              "site:x.com new AI tool free launch",
-              "site:x.com AI video cartoon tool launch",
-              "site:x.com airdrop testnet points official",
-              "site:x.com crypto campaign quest rewards",
-              "site:x.com AI automation agent demo"
+            'site:x.com ("AI agent" OR "AI tool") ("open source" OR released OR launch)',
+            'site:x.com ("AI video" OR cartoon OR animation) tool',
+            'site:x.com (airdrop OR testnet OR points) official',
+            'site:x.com ("earn" OR opportunity OR "creator tool") AI'
           ]
-          x_items=[]
+          xitems=[]
           for q in x_queries:
-              try:
-                  for item in rss_search(q,6):
-                      if item["url"] not in [x["url"] for x in x_items]:
-                          item["query"]=q
-                          x_items.append(item)
-              except Exception as e: errors.append("X public search: "+str(e)[:100])
-          x_items=x_items[:8]
+              for item in rss(q,5):
+                  final=source_link(item)
+                  if re.search(r"https?://(www\.)?(x\.com|twitter\.com)/",final):
+                      item["link"]=final
+                      if item["title"] not in [x["title"] for x in xitems]:
+                          xitems.append(item)
+          # Airdrops: only search indexed X posts, discard directory/blog/news results.
+          air=[]
+          for item in rss('site:x.com (airdrop OR testnet OR points) (official OR campaign OR tasks)',10):
+              final=source_link(item)
+              if re.search(r"https?://(www\.)?(x\.com|twitter\.com)/",final) and item["title"] not in [x["title"] for x in air]:
+                  item["link"]=final
+                  air.append(item)
+          xitems=xitems[:6]
+          air=air[:5]
 
-          # Other useful discovery sources (no crypto-news category)
-          other_feeds={
-              "🤖 नए AI टूल / प्रोजेक्ट":"new free AI tools OR open source AI project",
-              "💵 ऑनलाइन काम / कमाई":"remote AI training jobs India OR Hindi data annotation jobs OR freelance remote work",
-              "🎬 वीडियो / Reels प्रयोग":"Facebook Reels trends OR Instagram Reels trends OR YouTube Shorts trends",
-              "🏪 भारत में छोटे व्यवसाय के अवसर":"AI services small business India OR online business opportunities India",
-              "🌐 सार्वजनिक समुदायों के संकेत":"site:reddit.com AI tool launch OR site:news.ycombinator.com AI tools"
-          }
-          for category,q in other_feeds.items():
-              try: rss[category]=rss_search(q,6)
-              except Exception as e: errors.append(category+": "+str(e)[:100])
+          # Other non-crypto opportunities/tools; news is presented as a lead, not a confirmed job.
+          other=[]
+          for q in [
+            '"free AI tool" launch OR released',
+            '"open source" AI automation tool recently',
+            'India remote freelance opportunity AI creator tool'
+          ]:
+              other.extend(rss(q,3))
+          unique=[]
+          for it in other:
+              if it["title"] not in [x["title"] for x in unique]: unique.append(it)
+          other=unique[:5]
 
-          # Categorize repository type for useful, non-generic use hints
-          def project_use(text):
-              t=text.lower()
-              if any(k in t for k in ["clip","shorts","video editing","video editor"]): return "🎯 उपयोग: लंबी वीडियो से छोटे क्लिप बनाना या वीडियो एडिटिंग।"
-              if any(k in t for k in ["cartoon","animation","blender","3d"]): return "🎯 उपयोग: कार्टून, एनीमेशन या 3D सामग्री बनाना।"
-              if any(k in t for k in ["agent","mcp","automation","workflow"]): return "🎯 उपयोग: AI एजेंट, टूल जोड़ना या बार-बार होने वाला काम स्वचालित करना।"
-              if any(k in t for k in ["voice","speech","tts","audio"]): return "🎯 उपयोग: आवाज़ बनाना, आवाज़ से लिखना या ऑडियो प्रक्रिया।"
-              if any(k in t for k in ["image","photo","design"]): return "🎯 उपयोग: चित्र बनाना, बदलना या डिज़ाइन सहायता।"
-              return "🎯 उपयोग: प्रोजेक्ट के README और Demo से सही उपयोग पहचानें।"
-
-          def esc(s): return html.escape(str(s or ""),quote=True)
-          def bold(s): return "<b>"+esc(s)+"</b>"
-          def link(label,url): return '<a href="'+esc(url)+'">'+esc(label)+'</a>'
-          def section(title,body): return bold(title)+"\n"+body
+          def format_item(item, prefix="🔹"):
+              title=translate(item["title"])
+              desc=translate(item.get("desc",""))[:420]
+              link=item.get("link","")
+              date=when(item.get("date",""))
+              return f"{prefix} <b>{html.escape(title[:300])}</b>\n🗓️ {date}\n{html.escape(desc)}\n🔗 <a href='{html.escape(link,quote=True)}'>मूल स्रोत खोलें</a>"
 
           messages=[]
-          total_rss=sum(len(v) for v in rss.values())
-          summary=("🔎 <b>अवसर रडार</b>\n📅 "+now.strftime("%d-%m-%Y %H:%M IST")+"\n🗓 पिछले 14 दिनों की खोज\n\n"
-                  +"🧰 GitHub प्रोजेक्ट: "+str(len(gh))+"\n🪂 Airdrop संकेत: "+str(len(airdrops))+"\n𝕏 सार्वजनिक पोस्ट संकेत: "+str(len(x_items))+"\n💬 चर्चाएँ: "+str(len(hn))+"\n🔍 अन्य संकेत: "+str(total_rss)+"\n\n<i>ये खोज के संकेत हैं। हर प्रोजेक्ट/इनाम की आधिकारिक पुष्टि अलग से जाँचें।</i>")
-          messages.append(summary)
+          messages.append(f"🔎 <b>OPPORTUNITY RADAR</b>\n📅 {stamp}\n🕵️ पिछले 21 दिनों के अपडेट/खोज संकेत\n━━━━━━━━━━━━━━━━━━")
 
-          if gh_top:
-              for p in gh_top:
-                  desc=hi(p["desc"]) if p["desc"] else "विवरण नहीं दिया गया।"
-                  m="🧰 <b>GitHub प्रोजेक्ट</b>\n\n"+bold(p["name"])+" ⭐ "+str(p["stars"])+"\n"
-                  m+="📅 नया: "+esc(p["date"])+" | 💻 भाषा: "+esc(p["lang"])+" | 📜 लाइसेंस: "+esc(p["license"])+"\n\n"
-                  m+=section("📖 यह क्या है?",esc(desc[:650]))+"\n\n"
-                  m+=section("🎯 किस काम का?",esc(project_use(p["name"]+" "+p["desc"])))+"\n\n"
-                  m+=section("🚀 स्थापना/इस्तेमाल",esc(p["readme_steps"]))+"\n\n"
-                  m+=section("🖥️ हार्डवेयर",esc(p["hw_doc"]))+"\n\n"
-                  m+="💡 <i>कमाई का तरीका: यदि यह उपयोगी सेवा बन सके, तो संबंधित काम ग्राहक को देकर कमाई संभव; निश्चित आय नहीं।</i>\n\n"
-                  m+=link("🔗 GitHub प्रोजेक्ट",p["url"])
-                  if p.get("readme_url"): m+="\n"+link("📚 README / निर्देश",p["readme_url"])
-                  messages.append(m)
+          messages.append("🧰 <b>काम के GitHub प्रोजेक्ट</b>\n<i>README निर्देशों का अनुवादित सार है; लिंक खोलकर मूल निर्देश और सुरक्षा जाँचें।</i>")
+          if recent:
+              messages.extend(project_card(r) for r in recent)
+          else: messages.append("इस रन में नए/हाल में अपडेट प्रोजेक्ट नहीं मिले।")
 
-          if airdrops:
-              m="🪂 <b>नए Airdrop / Testnet संकेत</b>\n\n<i>यह खोज परिणाम है—इनाम पक्का नहीं। आधिकारिक X/वेबसाइट पर Tasks, पात्रता और नियम जाँचें।</i>\n\n"
-              for i,item in enumerate(airdrops,1):
-                  m+=str(i)+". "+bold(hi(item["title"])[:220])+"\n"
-                  if item.get("desc"): m+="📝 "+esc(hi(item["desc"][:300]))+"\n"
-                  m+="🔗 "+link("खोज में मिला स्रोत खोलें",item["url"])+"\n\n"
-              m+="⚠️ <i>इस रिपोर्ट में X अकाउंट/Discord/आधिकारिक Tasks लिंक तभी दिए जा सकते हैं जब खोज परिणामों में वास्तव में उपलब्ध हों। नकली लिंक नहीं जोड़े गए।</i>"
-              messages.append(m)
-          else:
-              messages.append("🪂 <b>Airdrop / Testnet</b>\nआज खोज में कोई पर्याप्त परिणाम नहीं मिला।")
+          messages.append("𝕏 <b>X पर सार्वजनिक पोस्ट संकेत</b>\n<i>यह पूर्ण X खोज नहीं है। केवल खोज इंजन में मिले सीधे X लिंक; पोस्ट/लिंक की पूर्ण जाँच उपलब्ध नहीं।</i>")
+          if xitems:
+              messages.extend(format_item(x) for x in xitems)
+          else: messages.append("इस रन में सीधे X लिंक वाला परिणाम नहीं मिला।")
 
-          if x_items:
-              m="𝕏 <b>X पर सार्वजनिक पोस्ट संकेत</b>\n\n<i>यह X की पूरी खोज/सभी पोस्ट का विश्लेषण नहीं है; केवल खोज इंजन में उपलब्ध सार्वजनिक पोस्ट/पेज संकेत हैं।</i>\n\n"
-              for item in x_items:
-                  m+="🔹 "+bold(hi(item["title"])[:230])+"\n"
-                  if item.get("desc"): m+="📝 "+esc(hi(item["desc"][:280]))+"\n"
-                  m+="🔗 "+link("पोस्ट/स्रोत खोलें",item["url"])+"\n\n"
-              messages.append(m)
+          messages.append("🪂 <b>Airdrop/Testnet — केवल X पोस्ट संकेत</b>\n<i>Airdrops.io/ब्लॉग/समाचार हटाए गए। कोई इनाम पक्का नहीं; पोस्ट/आधिकारिक साइट/Tasks की अलग पुष्टि करें। Seed phrase या पैसे न दें।</i>")
+          if air:
+              messages.extend(format_item(x,"🪂") for x in air)
+              messages.append("⚠️ इस रिपोर्ट में task steps तभी दिए जा सकते हैं जब स्रोत में स्पष्ट रूप से उपलब्ध हों; अभी केवल खोज-संकेत हैं, पात्रता/टास्क सत्यापित नहीं।")
+          else: messages.append("सीधे X लिंक वाला airdrop/testnet परिणाम नहीं मिला।")
 
-          if hn_top:
-              m="💬 <b>Hacker News चर्चाएँ</b>\n\n"
-              for r in hn_top:
-                  m+="🔹 "+bold(hi(r["title"])[:220])+"\n⬆️ अंक: "+str(r["points"])+" | 💬 टिप्पणियाँ: "+str(r["comments"])+"\n"
-                  m+=link("लेख",r["url"])+" | "+link("चर्चा",r["discussion"])+"\n\n"
-              messages.append(m)
-
-          for category,entries in rss.items():
-              if not entries: continue
-              m=bold(category)+"\n\n"
-              for item in entries[:4]:
-                  m+="🔸 "+bold(hi(item["title"])[:220])+"\n"
-                  if item.get("desc"): m+="📝 "+esc(hi(item["desc"][:220]))+"\n"
-                  m+="🔗 "+link("स्रोत खोलें",item["url"])+"\n\n"
-              messages.append(m)
+          messages.append("💡 <b>अन्य टूल/अवसर संकेत</b>\n<i>ये खोज परिणाम हैं, नौकरी/कमाई की पुष्टि नहीं। आवेदन/खरीद से पहले स्रोत जाँचें।</i>")
+          if other:
+              messages.extend(format_item(x) for x in other)
+          else: messages.append("इस रन में परिणाम नहीं मिले।")
 
           if errors:
-              m="⚠️ <b>कुछ स्रोत नहीं खुले</b>\n\n"
-              for e in errors[:8]: m+="• "+esc(e)+"\n"
-              messages.append(m)
-          messages.append("🛡️ <b>सुरक्षा</b>\nAirdrop के लिए पैसे जमा न करें। Seed Phrase/Private Key कभी न दें। अनजान APK न डालें और Wallet की अनजान अनुमति स्वीकार न करें। Points या Tasks का मतलब पक्का पैसा नहीं है।")
+              messages.append("⚠️ <b>कुछ खोज स्रोत विफल:</b>\n"+html.escape(" • ".join(errors[:4])))
+          messages.append("━━━━━━━━━━━━━━━━━━\n🔐 सुरक्षा: अज्ञात वेबसाइट पर पैसे, OTP, पासवर्ड या Seed Phrase न दें।\n<i>रिपोर्ट स्वचालित है; हर जानकारी स्वयं सत्यापित करें।</i>")
 
+          # Telegram HTML, chunk on paragraph boundaries; keep each message under safe limit.
           def send(text):
-              # Split Telegram HTML at paragraph boundaries; individual sections are kept small.
-              chunks=[]; current=""
-              for para in text.split("\n\n"):
-                  piece=para+"\n\n"
-                  if len(current)+len(piece)>3500 and current:
-                      chunks.append(current); current=piece
-                  else: current+=piece
-              if current.strip(): chunks.append(current)
-              for chunk in chunks:
-                  payload=json.dumps({"chat_id":CHAT,"text":chunk,"parse_mode":"HTML","disable_web_page_preview":True}).encode()
-                  req=urllib.request.Request("https://api.telegram.org/bot"+TOKEN+"/sendMessage",data=payload,headers={"Content-Type":"application/json"})
-                  response=json.loads(urllib.request.urlopen(req,timeout=30).read())
-                  if not response.get("ok"): raise RuntimeError("Telegram send failed: "+str(response))
-                  time.sleep(0.4)
-          for msg in messages: send(msg)
-          print("Radar finished. GitHub:",len(gh),"Airdrop leads:",len(airdrops),"X public leads:",len(x_items),"HN:",len(hn),"RSS:",total_rss,"Errors:",len(errors))
+              api=f"https://api.telegram.org/bot{BOT}/sendMessage"
+              payload={"chat_id":CHAT,"text":text,"parse_mode":"HTML","disable_web_page_preview":True}
+              data=urllib.parse.urlencode(payload).encode()
+              req=urllib.request.Request(api,data=data)
+              with urllib.request.urlopen(req,timeout=25) as res:
+                  body=json.loads(res.read())
+                  if not body.get("ok"): raise RuntimeError(str(body)[:250])
+          chunks=[]
+          current=""
+          for block in messages:
+              if len(current)+len(block)+2>3800:
+                  if current: chunks.append(current); current=""
+              if len(block)>3800:
+                  block=block[:3700]+"…"
+              current += ("\n\n" if current else "")+block
+          if current: chunks.append(current)
+          for chunk in chunks:
+              send(chunk)
+              time.sleep(1)
+          print("Sent",len(chunks),"Telegram messages.")
           PY
