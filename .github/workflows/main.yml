@@ -1,33 +1,195 @@
-msg += "💬 REDDIT: " + str(len(reddit_items)) + " मिले\n\n"
+name: Opportunity Radar
+
+'on':
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Search GitHub and Reddit
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.request
+          import urllib.parse
+          import os
+          import datetime
+
+          token = os.environ["BOT_TOKEN"]
+          chat = os.environ["CHAT_ID"]
+
+          today = datetime.date.today()
+          start = today - datetime.timedelta(days=14)
+
+          github_items = {}
+          reddit_items = {}
+          errors = []
+
+          github_queries = [
+              "AI video tools",
+              "AI video clipping",
+              "AI automation",
+              "open source AI agent",
+              "AI cartoon video"
+          ]
+
+          for q in github_queries:
+              search = q + " created:" + str(start) + ".." + str(today)
+
+              url = (
+                  "https://api.github.com/search/repositories?q="
+                  + urllib.parse.quote(search)
+                  + "&sort=stars&order=desc&per_page=5"
+              )
+
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "OpportunityRadar"}
+              )
+
+              try:
+                  data = json.loads(
+                      urllib.request.urlopen(req, timeout=20).read()
+                  )
+
+                  for r in data.get("items", []):
+                      name = r["full_name"]
+                      desc = r.get("description") or ""
+                      combined = (name + " " + desc).lower()
+
+                      bad_words = [
+                          "crack",
+                          "keygen",
+                          "pirated",
+                          "torrent",
+                          "fake download"
+                      ]
+
+                      if any(w in combined for w in bad_words):
+                          continue
+
+                      github_items[r["html_url"]] = {
+                          "name": name,
+                          "stars": r["stargazers_count"],
+                          "desc": desc[:200],
+                          "url": r["html_url"],
+                          "date": r.get("created_at", "")[:10]
+                      }
+
+              except Exception as e:
+                  errors.append("GitHub: " + str(e)[:150])
+
+          reddit_queries = [
+              "free AI tools",
+              "AI video tools",
+              "AI automation",
+              "make money online"
+          ]
+
+          for q in reddit_queries:
+              url = (
+                  "https://www.reddit.com/search.json?q="
+                  + urllib.parse.quote(q)
+                  + "&sort=new&limit=5"
+              )
+
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "Mozilla/5.0 OpportunityRadar"}
+              )
+
+              try:
+                  data = json.loads(
+                      urllib.request.urlopen(req, timeout=20).read()
+                  )
+
+                  for p in data.get("data", {}).get("children", []):
+                      r = p["data"]
+
+                      link = "https://www.reddit.com" + r["permalink"]
+
+                      reddit_items[link] = {
+                          "name": r["title"][:180],
+                          "votes": r.get("score", 0),
+                          "desc": r.get("selftext", "")[:150],
+                          "url": link
+                      }
+
+              except Exception as e:
+                  errors.append("Reddit: " + str(e)[:150])
+
+          gh = sorted(
+              github_items.values(),
+              key=lambda x: x["stars"],
+              reverse=True
+          )[:4]
+          rd = sorted(
+              reddit_items.values(),
+              key=lambda x: x["votes"],
+              reverse=True
+          )[:3]
+
+          msg = "🔎 OPPORTUNITY RADAR\n"
+          msg += "📅 " + str(today) + "\n\n"
+
+          msg += "🛠️ GITHUB: " + str(len(github_items)) + " मिले\n\n"
+
+          for r in gh:
+              msg += "📌 " + r["name"] + "\n"
+              msg += "⭐ Stars: " + str(r["stars"]) + "\n"
+              msg += "📅 " + r["date"] + "\n"
+              msg += r["desc"] + "\n"
+              msg += r["url"] + "\n\n"
+
+          msg += "💬 REDDIT: " + str(len(reddit_items)) + " मिले\n\n"
 
           for r in rd:
               msg += "🔹 " + r["name"] + "\n"
-              msg += "⬆️ Votes: " + str(r["stars"]) + "\n"
+              msg += "⬆️ Votes: " + str(r["votes"]) + "\n"
+
               if r["desc"]:
-                  msg += r["desc"][:150] + "\n"
+                  msg += r["desc"] + "\n"
+
               msg += r["url"] + "\n\n"
 
           if errors:
-              msg += "⚠️ SOURCE ERRORS:\n"
+              msg += "⚠️ ERRORS:\n"
+
               for e in errors[:3]:
                   msg += e + "\n"
 
           if not gh and not rd:
-              msg += "आज कोई परिणाम नहीं मिला।\n"
+              msg += "इस बार कोई परिणाम नहीं मिला।\n"
 
-          msg += "\n⚠️ Stars/Votes भरोसे का प्रमाण नहीं हैं। डाउनलोड करने से पहले जाँचें।"
+          msg += "\n⚠️ डाउनलोड करने से पहले प्रोजेक्ट जाँचें।"
 
-          url = "https://api.telegram.org/bot" + token + "/sendMessage"
+          telegram_url = (
+              "https://api.telegram.org/bot"
+              + token
+              + "/sendMessage"
+          )
+
           payload = json.dumps({
               "chat_id": chat,
               "text": msg[:4000]
           }).encode()
 
           req = urllib.request.Request(
-              url,
+              telegram_url,
               data=payload,
               headers={"Content-Type": "application/json"}
           )
 
           print(urllib.request.urlopen(req).read().decode())
+
           PY
