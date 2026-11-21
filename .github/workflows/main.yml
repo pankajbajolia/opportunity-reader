@@ -1,15 +1,61 @@
-name: Opportunity Radar Test
+name: Opportunity Radar
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */4 * * *"
 
 jobs:
-  telegram-test:
+  radar:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Send Telegram Test
+      - name: Search new GitHub projects
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=✅ Opportunity Radar connected! Your free AI opportunity agent is being built."
+          python - <<'PY'
+          import json, urllib.request, datetime, os
+
+          token = os.environ["BOT_TOKEN"]
+          chat = os.environ["CHAT_ID"]
+
+          today = datetime.date.today()
+          start = today - datetime.timedelta(days=7)
+
+          queries = [
+              "AI video created:" + str(start) + ".." + str(today),
+              "AI agent created:" + str(start) + ".." + str(today),
+              "open source AI tools created:" + str(start) + ".." + str(today)
+          ]
+
+          found = {}
+
+          for q in queries:
+              url = "https://api.github.com/search/repositories?q=" + urllib.parse.quote(q) + "&sort=stars&order=desc&per_page=5"
+              req = urllib.request.Request(url, headers={"User-Agent": "OpportunityRadar"})
+              try:
+                  data = json.loads(urllib.request.urlopen(req, timeout=20).read())
+                  for repo in data.get("items", []):
+                      found[repo["html_url"]] = repo
+              except Exception as e:
+                  print("Search error:", e)
+
+          items = sorted(found.values(), key=lambda x: x["stargazers_count"], reverse=True)[:7]
+
+          if items:
+              msg = "🔎 OPPORTUNITY RADAR\n\nनए GitHub AI प्रोजेक्ट (पिछले 7 दिन):\n\n"
+              for r in items:
+                  msg += "📌 " + r["full_name"] + "\n"
+                  msg += "⭐ Stars: " + str(r["stargazers_count"]) + "\n"
+                  msg += (r.get("description") or "Description नहीं है")[:250] + "\n"
+                  msg += r["html_url"] + "\n\n"
+          else:
+              msg = "🔎 Opportunity Radar: इस बार नए प्रोजेक्ट नहीं मिले या API समस्या हुई।"
+
+          url = "https://api.telegram.org/bot" + token + "/sendMessage"
+          payload = json.dumps({"chat_id": chat, "text": msg}).encode()
+          req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req).read().decode())
+          PY
