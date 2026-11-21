@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Search GitHub and Reddit
+      - name: Search GitHub and Hacker News
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -30,11 +30,13 @@ jobs:
 
           today = datetime.date.today()
           start = today - datetime.timedelta(days=14)
+          start_ts = int(datetime.datetime.combine(start, datetime.time()).timestamp())
 
           github_items = {}
-          reddit_items = {}
+          hn_items = {}
           errors = []
 
+          # GitHub search
           github_queries = [
               "AI video tools",
               "AI video clipping",
@@ -68,110 +70,131 @@ jobs:
                       combined = (name + " " + desc).lower()
 
                       bad_words = [
-                          "crack",
-                          "keygen",
-                          "pirated",
-                          "torrent",
-                          "fake download"
+                          "crack", "keygen", "pirated",
+                          "torrent", "fake download"
                       ]
 
                       if any(w in combined for w in bad_words):
                           continue
 
+                      license_info = r.get("license")
+                      license_name = (
+                          license_info["spdx_id"]
+                          if license_info else "License unknown"
+                      )
+
                       github_items[r["html_url"]] = {
                           "name": name,
                           "stars": r["stargazers_count"],
-                          "desc": desc[:200],
+                          "desc": desc[:180],
                           "url": r["html_url"],
-                          "date": r.get("created_at", "")[:10]
+                          "date": r.get("created_at", "")[:10],
+                          "language": r.get("language") or "Unknown",
+                          "license": license_name,
+                          "size": r.get("size", 0)
                       }
 
               except Exception as e:
-                  errors.append("GitHub: " + str(e)[:150])
+                  errors.append("GitHub: " + str(e)[:120])
 
-          reddit_queries = [
-              "free AI tools",
-              "AI video tools",
-              "AI automation",
-              "make money online"
+          # Hacker News search
+          hn_queries = [
+              "AI video",
+              "AI tools",
+              "AI agent",
+              "open source AI",
+              "video clipping"
           ]
 
-          for q in reddit_queries:
+          for q in hn_queries:
               url = (
-                  "https://www.reddit.com/search.json?q="
-                  + urllib.parse.quote(q)
-                  + "&sort=new&limit=5"
+                  "https://hn.algolia.com/api/v1/search_by_date?"
+                  + urllib.parse.urlencode({
+                      "query": q,
+                      "tags": "story",
+                      "numericFilters": "created_at_i>" + str(start_ts),
+                      "hitsPerPage": 10
+                  })
               )
 
               req = urllib.request.Request(
                   url,
-                  headers={"User-Agent": "Mozilla/5.0 OpportunityRadar"}
+                  headers={"User-Agent": "OpportunityRadar"}
               )
 
               try:
                   data = json.loads(
                       urllib.request.urlopen(req, timeout=20).read()
                   )
+                  for h in data.get("hits", []):
+                      title = h.get("title") or ""
+                      link = h.get("url") or (
+                          "https://news.ycombinator.com/item?id="
+                          + h["objectID"]
+                      )
 
-                  for p in data.get("data", {}).get("children", []):
-                      r = p["data"]
-
-                      link = "https://www.reddit.com" + r["permalink"]
-
-                      reddit_items[link] = {
-                          "name": r["title"][:180],
-                          "votes": r.get("score", 0),
-                          "desc": r.get("selftext", "")[:150],
-                          "url": link
+                      hn_items[h["objectID"]] = {
+                          "title": title[:180],
+                          "points": h.get("points") or 0,
+                          "comments": h.get("num_comments") or 0,
+                          "url": link,
+                          "discussion": (
+                              "https://news.ycombinator.com/item?id="
+                              + h["objectID"]
+                          )
                       }
 
               except Exception as e:
-                  errors.append("Reddit: " + str(e)[:150])
+                  errors.append("Hacker News: " + str(e)[:120])
 
           gh = sorted(
               github_items.values(),
               key=lambda x: x["stars"],
               reverse=True
           )[:4]
-          rd = sorted(
-              reddit_items.values(),
-              key=lambda x: x["votes"],
+
+          hn = sorted(
+              hn_items.values(),
+              key=lambda x: x["points"],
               reverse=True
-          )[:3]
+          )[:4]
 
           msg = "🔎 OPPORTUNITY RADAR\n"
-          msg += "📅 " + str(today) + "\n\n"
+          msg += "📅 " + str(today) + "\n"
+          msg += "🔍 पिछले 14 दिनों की खोज\n\n"
 
           msg += "🛠️ GITHUB: " + str(len(github_items)) + " मिले\n\n"
 
           for r in gh:
               msg += "📌 " + r["name"] + "\n"
               msg += "⭐ Stars: " + str(r["stars"]) + "\n"
+              msg += "💻 Language: " + r["language"] + "\n"
+              msg += "📜 License: " + r["license"] + "\n"
               msg += "📅 " + r["date"] + "\n"
               msg += r["desc"] + "\n"
               msg += r["url"] + "\n\n"
 
-          msg += "💬 REDDIT: " + str(len(reddit_items)) + " मिले\n\n"
+          msg += "📰 HACKER NEWS: " + str(len(hn_items)) + " मिले\n\n"
 
-          for r in rd:
-              msg += "🔹 " + r["name"] + "\n"
-              msg += "⬆️ Votes: " + str(r["votes"]) + "\n"
-
-              if r["desc"]:
-                  msg += r["desc"] + "\n"
-
-              msg += r["url"] + "\n\n"
+          for r in hn:
+              msg += "🔹 " + r["title"] + "\n"
+              msg += "⬆️ Points: " + str(r["points"])
+              msg += " | 💬 " + str(r["comments"]) + "\n"
+              msg += r["url"] + "\n"
+              msg += "Discussion: " + r["discussion"] + "\n\n"
 
           if errors:
-              msg += "⚠️ ERRORS:\n"
-
+              msg += "⚠️ SOURCE ERRORS:\n"
               for e in errors[:3]:
                   msg += e + "\n"
 
-          if not gh and not rd:
+          if not gh and not hn:
               msg += "इस बार कोई परिणाम नहीं मिला।\n"
 
-          msg += "\n⚠️ डाउनलोड करने से पहले प्रोजेक्ट जाँचें।"
+          msg += (
+              "\n⚠️ Free होने, सुरक्षा और PC compatibility "
+              "की जाँच खुद करें। Stars/Points भरोसे का प्रमाण नहीं हैं।"
+          )
 
           telegram_url = (
               "https://api.telegram.org/bot"
@@ -191,5 +214,4 @@ jobs:
           )
 
           print(urllib.request.urlopen(req).read().decode())
-
           PY
