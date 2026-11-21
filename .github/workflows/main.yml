@@ -36,6 +36,56 @@ jobs:
               req = urllib.request.Request(url, headers=headers or {"User-Agent":"OpportunityRadar/1.0"})
               return urllib.request.urlopen(req, timeout=timeout).read()
 
+          # Translate source text into simple Hindi (fallback keeps original if translation fails).
+          translation_cache = {}
+          translation_calls = 0
+          def clean(s):
+              return re.sub(r"\s+", " ", str(s or "")).strip()
+
+          def hi(text):
+              global translation_calls
+              text = clean(text)
+              if not text:
+                  return "जानकारी उपलब्ध नहीं"
+              if text in translation_cache:
+                  return translation_cache[text]
+              if translation_calls >= 35:
+                  return text
+              translation_calls += 1
+              try:
+                  url = "https://translate.googleapis.com/translate_a/single?" + urllib.parse.urlencode({
+                      "client":"gtx", "sl":"auto", "tl":"hi", "dt":"t", "q":text[:900]
+                  })
+                  data = json.loads(fetch(url, timeout=8))
+                  translated = "".join(part[0] for part in data[0] if part and part[0])
+                  translated = clean(translated) or text
+              except Exception:
+                  translated = text
+              translation_cache[text] = translated
+              return translated
+
+          def project_use(text):
+              t = text.lower()
+              if any(k in t for k in ["clip", "shorts", "video editing", "video editor"]):
+                  return ("🎯 काम: लंबी वीडियो से छोटे क्लिप/Shorts बनाने या वीडियो एडिटिंग में मदद कर सकता है।",
+                          "🚀 शुरू करें: लिंक खोलें → README/Installation पढ़ें → Demo उपलब्ध हो तो पहले आज़माएँ → फिर अपनी वीडियो पर टेस्ट करें।",
+                          "💰 कमाई: वीडियो क्लिप/एडिटिंग सेवा देकर ग्राहक मिल सकते हैं; कमाई निश्चित नहीं।")
+              if any(k in t for k in ["cartoon", "animation", "blender", "3d"]):
+                  return ("🎯 काम: कार्टून, एनीमेशन या 3D सामग्री बनाने के काम आ सकता है।",
+                          "🚀 शुरू करें: लिंक खोलें → आवश्यक Software और Hardware जाँचें → Demo/README के अनुसार चलाएँ।",
+                          "💰 कमाई: एनीमेशन/3D सामग्री बनाकर सेवा दे सकते हैं; कमाई निश्चित नहीं।")
+              if any(k in t for k in ["agent", "mcp", "automation", "workflow"]):
+                  return ("🎯 काम: AI से काम करवाने, टूल जोड़ने या प्रक्रिया स्वचालित करने में उपयोग हो सकता है।",
+                          "🚀 शुरू करें: लिंक खोलें → आवश्यक AI/API और Software जाँचें → पहले छोटे Demo से टेस्ट करें।",
+                          "💰 कमाई: व्यवसायों के लिए Automation सेटअप/सेवा दे सकते हैं; कमाई निश्चित नहीं।")
+              if any(k in t for k in ["phone", "android", "mobile"]):
+                  return ("🎯 काम: Android फोन को दूसरे काम या नियंत्रण के लिए उपयोग करने में मदद कर सकता है।",
+                          "🚀 शुरू करें: लिंक खोलें → फोन और PC की Compatibility जाँचें → निर्देशों के अनुसार जोड़ें।",
+                          "💰 कमाई: सीधे कमाई का प्रमाण नहीं; उपयोगी सेटअप को सेवा के रूप में देना संभव हो सकता है।")
+              return ("🎯 काम: इसका उपयोग विवरण और Demo देखकर तय करें; केवल नाम से उपयोग पक्का नहीं है।",
+                      "🚀 शुरू करें: लिंक खोलें → README/Installation और Demo जाँचें → अपनी जरूरत के अनुसार टेस्ट करें।",
+                      "💰 कमाई: सीधे कमाई की पुष्टि नहीं; सेवा या काम में उपयोग होने पर अवसर बन सकता है।")
+
           # GitHub repository search (public API; unauthenticated rate limit applies)
           gh_queries = ["AI video tools", "AI video clipping", "open source AI agent", "AI cartoon video", "AI automation"]
           for q in gh_queries:
@@ -104,15 +154,12 @@ jobs:
           def ram_hint(text):
               t=text.lower()
               if any(k in t for k in ["llm", "local model", "language model", "stable diffusion", "generative video", "video generation", "training model"]):
-                  return "RAM: 16GB+ suggested (rough estimate; GPU/VRAM may matter; check docs)"
+                  return "🧠 RAM: अनुमान 16GB या अधिक; GPU/VRAM भी जरूरी हो सकती है। असली जरूरत दस्तावेज़ में जाँचें।"
               if any(k in t for k in ["video editing", "video clip", "clipping", "blender", "3d", "animation"]):
-                  return "RAM: 8–16GB suggested (rough estimate; project size matters)"
+                  return "🧠 RAM: अनुमान 8–16GB; वीडियो/प्रोजेक्ट बड़ा होने पर ज्यादा लग सकती है।"
               if any(k in t for k in ["browser", "web app", "dashboard", "automation", "agent", "mcp"]):
-                  return "RAM: 4–8GB suggested (rough estimate; runtime/model may increase it)"
-              return "RAM: requirement unknown; check project documentation"
-
-          def clean(s):
-              return re.sub(r"\s+", " ", str(s or "")).strip()
+                  return "🧠 RAM: अनुमान 4–8GB; AI मॉडल चलाने पर ज्यादा लग सकती है।"
+              return "🧠 RAM: जानकारी नहीं मिली; प्रोजेक्ट के निर्देश जाँचें।"
 
           gh_top = sorted(gh.values(), key=lambda x:x["stars"], reverse=True)[:6]
           # Inspect README for stated hardware requirements when accessible.
@@ -126,40 +173,45 @@ jobs:
                   lines = [clean(line) for line in raw.splitlines() if re.search(r"\b(ram|memory|vram|gpu|cuda|hardware|system requirements|minimum requirements|recommended requirements)\b", line, re.I)]
                   lines = [line for line in lines if line and len(line) < 300]
                   if lines:
-                      project["hw_doc"] = "README mentions: " + " | ".join(lines[:3])
+                      project["hw_doc"] = "README में हार्डवेयर की जानकारी: " + " | ".join(hi(line) for line in lines[:3])
               except Exception:
                   pass
 
           hn_top = sorted(hn.values(), key=lambda x:x["points"], reverse=True)[:5]
           total_rss = sum(len(v) for v in rss.values())
           messages=[]
-          summary = ("🔎 OPPORTUNITY RADAR\n📅 " + now.strftime("%d-%m-%Y %H:%M IST") + "\n🗓 Public-source scan: last 14 days (where dates available)\n\n"
-                     + "🛠 GitHub: " + str(len(gh)) + " repos found\n📰 Hacker News: " + str(len(hn)) + " stories found\n🔎 News/RSS leads: " + str(total_rss) + "\n\n"
-                     + "Sources may be incomplete. Headlines and airdrops are leads—not verified recommendations.")
+          summary = ("🔎 अवसर रडार\n📅 " + now.strftime("%d-%m-%Y %H:%M IST") + "\n🗓 पिछले 14 दिनों की सार्वजनिक खोज (जहाँ तारीख उपलब्ध है)\n\n"
+                     + "🛠 GitHub प्रोजेक्ट: " + str(len(gh)) + " मिले\n📰 Hacker News चर्चाएँ: " + str(len(hn)) + " मिलीं\n🔎 खबर/ RSS संकेत: " + str(total_rss) + "\n\n"
+                     + "स्रोत अधूरे हो सकते हैं। शीर्षक/एयरड्रॉप केवल खोज संकेत हैं—पुष्ट सलाह नहीं।")
           messages.append(summary)
 
           if gh_top:
-              m="🛠 GITHUB PROJECTS — Top by stars (not a safety ranking)\n\n"
+              m="🛠 GitHub प्रोजेक्ट — सितारों के आधार पर (सुरक्षा रैंकिंग नहीं)\n\n"
               for r in gh_top:
-                  m += ("📌 " + r["name"] + " | ⭐ " + str(r["stars"]) + "\n📅 " + r["date"] + " | " + r["lang"] + " | License: " + r["license"] + "\n"
-                        + clean(r["desc"])[:230] + "\n" + r["hw_doc"][:350] + "\n" + ram_hint(r["name"]+" "+r["desc"]) + "\n🔗 " + r["url"] + "\n\n")
+                  use, steps, earning = project_use(r["name"] + " " + r["desc"])
+                  desc_hi = hi(r["desc"]) if r["desc"] else "विवरण उपलब्ध नहीं। लिंक/README देखें।"
+                  hw_hi = hi(r["hw_doc"]) if r["hw_doc"] else "हार्डवेयर की जानकारी नहीं मिली।"
+                  m += ("📌 " + r["name"] + " | ⭐ " + str(r["stars"]) + "\n📅 बनाया: " + r["date"] + " | भाषा: " + r["lang"] + " | लाइसेंस: " + r["license"] + "\n"
+                        + "📖 यह क्या है: " + desc_hi[:450] + "\n" + use + "\n" + steps + "\n" + earning + "\n"
+                        + hw_hi[:350] + "\n" + ram_hint(r["name"]+" "+r["desc"]) + "\n🔗 असली लिंक: " + r["url"] + "\n\n")
               messages.append(m)
           if hn_top:
-              m="📰 HACKER NEWS — Top by points\n\n"
+              m="📰 Hacker News — चर्चाओं के अंक के आधार पर\n\n"
               for r in hn_top:
-                  m += ("🔹 " + clean(r["title"])[:220] + "\n⬆️ " + str(r["points"]) + " | 💬 " + str(r["comments"]) + "\n🔗 " + r["url"] + "\nDiscussion: " + r["discussion"] + "\n\n")
+                  m += ("🔹 " + hi(r["title"])[:220] + "\n📌 मूल शीर्षक: " + clean(r["title"])[:180] + "\n⬆️ अंक: " + str(r["points"]) + " | 💬 टिप्पणियाँ: " + str(r["comments"]) + "\n📝 यह केवल शीर्षक/चर्चा है; पूरा लेख खोलकर जाँचें।\n🔗 लेख: " + r["url"] + "\n🔗 चर्चा: " + r["discussion"] + "\n\n")
               messages.append(m)
           for category, entries in rss.items():
               if not entries: continue
-              m=category + " — RSS SEARCH LEADS (verify before acting)\n\n"
+              m=category + " — खबर/खोज संकेत (पहले पुष्टि करें)\n\n"
               for item in entries[:4]:
-                  m += ("🔸 " + clean(item["title"])[:230] + "\n📅 " + (item["date"] or "Date not provided") + "\n🔗 " + item["url"] + "\n\n")
+                  snippet = hi(item["desc"][:180]) if item.get("desc") else "अतिरिक्त विवरण उपलब्ध नहीं; लिंक खोलकर पढ़ें।"
+                  m += ("🔸 " + hi(item["title"])[:230] + "\n📅 तारीख: " + (item["date"] or "तारीख उपलब्ध नहीं") + "\n📝 विवरण: " + snippet[:220] + "\n🔗 मूल लिंक: " + item["url"] + "\n\n")
               messages.append(m)
           if errors:
-              m="⚠️ SOURCE ERRORS (other sources may still have worked)\n\n"
+              m="⚠️ स्रोत में त्रुटि (बाकी स्रोत काम कर सकते हैं)\n\n"
               for e in errors[:8]: m += "• " + e + "\n"
               messages.append(m)
-          messages.append("⚠️ Safety: Airdrop/earning headlines are NOT proof of rewards or income. Never pay to claim, share seed phrase, install unknown APKs, or approve suspicious wallet permissions. Social platform data (X/Facebook/Instagram) may be unavailable without login/API; this report uses public search leads only.")
+          messages.append("⚠️ सुरक्षा: एयरड्रॉप या कमाई की खबर से पैसा मिलने की पुष्टि नहीं होती। दावा करने के लिए पैसे न दें, Seed Phrase कभी साझा न करें, अनजान APK न डालें और संदिग्ध Wallet अनुमति न दें। X/Facebook/Instagram की जानकारी Login/API के बिना अधूरी हो सकती है; यहाँ सार्वजनिक खोज के संकेत हैं।")
 
           # Split at paragraph boundaries to stay under Telegram's message size limit.
           def send(text):
