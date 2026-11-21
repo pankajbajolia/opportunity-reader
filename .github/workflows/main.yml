@@ -1,4 +1,3 @@
-
 name: Opportunity Radar
 
 'on':
@@ -12,214 +11,173 @@ permissions:
 jobs:
   radar:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
-      - name: Search Opportunities
+      - name: Search public sources and send Telegram report
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
-          import os
-          import json
-          import urllib.request
-          import urllib.parse
-          import datetime
+          import os, json, urllib.request, urllib.parse, xml.etree.ElementTree as ET
+          import datetime, email.utils, html, re, time, base64
 
-          token = os.environ["BOT_TOKEN"]
-          chat = os.environ["CHAT_ID"]
+          TOKEN = os.environ.get("BOT_TOKEN", "")
+          CHAT = os.environ.get("CHAT_ID", "")
+          if not TOKEN or not CHAT:
+              raise RuntimeError("Telegram secrets missing: BOT_TOKEN or CHAT_ID")
 
-          today = datetime.date.today()
-          start = today - datetime.timedelta(days=14)
+          IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+          now = datetime.datetime.now(IST)
+          since = now.date() - datetime.timedelta(days=14)
+          errors, gh, hn, rss = [], {}, {}, {}
 
-          github_results = {}
-          hn_results = {}
-          errors = []
+          def fetch(url, headers=None, timeout=25):
+              req = urllib.request.Request(url, headers=headers or {"User-Agent":"OpportunityRadar/1.0"})
+              return urllib.request.urlopen(req, timeout=timeout).read()
 
-          github_queries = [
-              "AI video tools",
-              "AI video clipping",
-              "AI automation",
-              "open source AI agent",
-              "AI cartoon video"
-          ]
-
-          for query in github_queries:
-              search = query + " created:" + str(start) + ".." + str(today)
-
-              url = "https://api.github.com/search/repositories?q=" + urllib.parse.quote(search) + "&sort=stars&order=desc&per_page=5"
-
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "OpportunityRadar"}
-              )
-
+          # GitHub repository search (public API; unauthenticated rate limit applies)
+          gh_queries = ["AI video tools", "AI video clipping", "open source AI agent", "AI cartoon video", "AI automation"]
+          for q in gh_queries:
               try:
-                  data = json.loads(
-                      urllib.request.urlopen(req, timeout=25).read()
-                  )
-
-                  for item in data.get("items", []):
-                      link = item["html_url"]
-
-                      github_results[link] = {
-                          "name": item["full_name"],
-                          "stars": item["stargazers_count"],
-                          "description": item.get("description") or "No description",
-                          "url": link,
-                          "date": item.get("created_at", "")[:10],
-                          "language": item.get("language") or "Unknown",
-                          "license": (
-                              item["license"]["spdx_id"]
-                              if item.get("license")
-                              else "Unknown"
-                          )
-                      }
-
-              except Exception as e:
-                  errors.append("GitHub: " + str(e)[:150])
-
-          hn_queries = [
-              "AI video",
-              "AI tools",
-              "AI agent",
-              "open source AI",
-              "video clipping"
-          ]
-
-          start_ts = int(
-              datetime.datetime.combine(
-                  start,
-                  datetime.time()
-              ).timestamp()
-          )
-
-          for query in hn_queries:
-              url = "https://hn.algolia.com/api/v1/search_by_date?" + urllib.parse.urlencode({
-                  "query": query,
-                  "tags": "story",
-                  "numericFilters": "created_at_i>" + str(start_ts),
-                  "hitsPerPage": 10
-              })
-
-              req = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "OpportunityRadar"}
-              )
-
-              try:
-                  data = json.loads(
-                      urllib.request.urlopen(req, timeout=25).read()
-                  )
-
-                  for item in data.get("hits", []):
-                      title = item.get("title") or ""
-
-                      if not title:
+                  query = q + " created:" + str(since) + ".." + str(now.date())
+                  url = "https://api.github.com/search/repositories?" + urllib.parse.urlencode({"q":query,"sort":"stars","order":"desc","per_page":5})
+                  data = json.loads(fetch(url, {"User-Agent":"OpportunityRadar","Accept":"application/vnd.github+json"}))
+                  for r in data.get("items", []):
+                      link = r.get("html_url", "")
+                      desc = (r.get("description") or "").strip()
+                      txt = (r.get("full_name","") + " " + desc).lower()
+                      if any(w in txt for w in ["crack", "keygen", "pirated", "torrent", "fake download"]):
                           continue
-
-                      link = item.get("url") or (
-                          "https://news.ycombinator.com/item?id="
-                          + item["objectID"]
-                      )
-
-                      hn_results[item["objectID"]] = {
-                          "title": title,
-                          "points": item.get("points") or 0,
-                          "comments": item.get("num_comments") or 0,
-                          "url": link,
-                          "discussion": "https://news.ycombinator.com/item?id=" + item["objectID"]
-                      }
-
+                      lic = (r.get("license") or {}).get("spdx_id", "Not specified")
+                      gh[link] = {"name":r.get("full_name","?"),"stars":r.get("stargazers_count",0),"desc":desc,"url":link,"date":(r.get("created_at","")[:10]),"lang":r.get("language") or "Unknown","license":lic}
               except Exception as e:
-                  errors.append("Hacker News: " + str(e)[:150])
+                  errors.append("GitHub search: " + str(e)[:130])
 
-          github_top = sorted(
-              github_results.values(),
-              key=lambda x: x["stars"],
-              reverse=True
-          )[:8]
+          # Hacker News recent search
+          for q in ["AI video", "AI tools", "AI agent", "open source AI", "video clipping"]:
+              try:
+                  url = "https://hn.algolia.com/api/v1/search_by_date?" + urllib.parse.urlencode({"query":q,"tags":"story","numericFilters":"created_at_i>" + str(int(datetime.datetime.combine(since,datetime.time(),tzinfo=IST).timestamp())),"hitsPerPage":10})
+                  data = json.loads(fetch(url))
+                  for h in data.get("hits", []):
+                      title = h.get("title") or ""
+                      if not title: continue
+                      link = h.get("url") or ("https://news.ycombinator.com/item?id=" + h.get("objectID",""))
+                      hn[h.get("objectID",link)] = {"title":title,"points":h.get("points") or 0,"comments":h.get("num_comments") or 0,"url":link,"discussion":"https://news.ycombinator.com/item?id=" + h.get("objectID","")}
+              except Exception as e:
+                  errors.append("Hacker News: " + str(e)[:130])
 
-          hn_top = sorted(
-              hn_results.values(),
-              key=lambda x: x["points"],
-              reverse=True
-          )[:8]
+          # Google News public RSS queries. Headlines are leads, not verified claims.
+          feeds = {
+              "🤖 AI TOOLS / PROJECTS":"new free AI tools OR open source AI project",
+              "💵 ONLINE EARNING / DOLLAR WORK":"remote AI training jobs India OR Hindi data annotation jobs OR freelance remote work",
+              "🪙 CRYPTO AIRDROPS / TESTNET":"crypto airdrop testnet points rewards official",
+              "📱 SOCIAL / REELS TRENDS":"Facebook Reels trends OR Instagram Reels trends OR YouTube Shorts trends",
+              "🏪 BUSINESS IDEAS INDIA":"AI services small business India OR online business opportunities India",
+              "🌐 PUBLIC COMMUNITY MENTIONS":"site:reddit.com AI tool launch OR site:x.com crypto airdrop testnet"
+          }
+          for category, q in feeds.items():
+              try:
+                  params = {"q":q,"hl":"en-IN","gl":"IN","ceid":"IN:en"}
+                  url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
+                  root = ET.fromstring(fetch(url))
+                  entries=[]
+                  for item in root.findall(".//item"):
+                      title = html.unescape(re.sub("<[^>]+>","",item.findtext("title", ""))).strip()
+                      link = item.findtext("link", "").strip()
+                      pub = item.findtext("pubDate", "")
+                      if pub:
+                          try:
+                              pub_dt = email.utils.parsedate_to_datetime(pub)
+                              if pub_dt.date() < since:
+                                  continue
+                          except Exception:
+                              pass
+                      desc = html.unescape(re.sub("<[^>]+>"," ",item.findtext("description", ""))).strip()
+                      if title and link:
+                          entries.append({"title":title,"url":link,"date":pub,"desc":desc[:240]})
+                  rss[category]=entries[:5]
+              except Exception as e:
+                  errors.append(category + ": " + str(e)[:130])
 
-          messages = []
+          # Simple RAM guidance based on project type/description. This is a rough estimate, not source-verified.
+          def ram_hint(text):
+              t=text.lower()
+              if any(k in t for k in ["llm", "local model", "language model", "stable diffusion", "generative video", "video generation", "training model"]):
+                  return "RAM: 16GB+ suggested (rough estimate; GPU/VRAM may matter; check docs)"
+              if any(k in t for k in ["video editing", "video clip", "clipping", "blender", "3d", "animation"]):
+                  return "RAM: 8–16GB suggested (rough estimate; project size matters)"
+              if any(k in t for k in ["browser", "web app", "dashboard", "automation", "agent", "mcp"]):
+                  return "RAM: 4–8GB suggested (rough estimate; runtime/model may increase it)"
+              return "RAM: requirement unknown; check project documentation"
 
-          summary = "🔎 OPPORTUNITY RADAR\n"
-          summary += "📅 " + str(today) + "\n"
-          summary += "🗓 पिछले 14 दिनों की खोज\n\n"
-          summary += "🛠 GitHub: " + str(len(github_results)) + " Projects मिले\n"
-          summary += "📰 Hacker News: " + str(len(hn_results)) + " Discussions मिली\n\n"
-          summary += "⭐ Top Sources की रिपोर्ट नीचे है।"
+          def clean(s):
+              return re.sub(r"\s+", " ", str(s or "")).strip()
 
+          gh_top = sorted(gh.values(), key=lambda x:x["stars"], reverse=True)[:6]
+          # Inspect README for stated hardware requirements when accessible.
+          for project in gh_top:
+              project["hw_doc"] = "Not found in accessible README; estimate only"
+              try:
+                  owner, repo = project["name"].split("/", 1)
+                  readme_url = "https://api.github.com/repos/" + owner + "/" + repo + "/readme"
+                  rd = json.loads(fetch(readme_url, {"User-Agent":"OpportunityRadar","Accept":"application/vnd.github+json"}))
+                  raw = base64.b64decode(rd.get("content", "")).decode("utf-8", errors="ignore")
+                  lines = [clean(line) for line in raw.splitlines() if re.search(r"\b(ram|memory|vram|gpu|cuda|hardware|system requirements|minimum requirements|recommended requirements)\b", line, re.I)]
+                  lines = [line for line in lines if line and len(line) < 300]
+                  if lines:
+                      project["hw_doc"] = "README mentions: " + " | ".join(lines[:3])
+              except Exception:
+                  pass
+
+          hn_top = sorted(hn.values(), key=lambda x:x["points"], reverse=True)[:5]
+          total_rss = sum(len(v) for v in rss.values())
+          messages=[]
+          summary = ("🔎 OPPORTUNITY RADAR\n📅 " + now.strftime("%d-%m-%Y %H:%M IST") + "\n🗓 Public-source scan: last 14 days (where dates available)\n\n"
+                     + "🛠 GitHub: " + str(len(gh)) + " repos found\n📰 Hacker News: " + str(len(hn)) + " stories found\n🔎 News/RSS leads: " + str(total_rss) + "\n\n"
+                     + "Sources may be incomplete. Headlines and airdrops are leads—not verified recommendations.")
           messages.append(summary)
 
-          gh_msg = "🛠 GITHUB PROJECTS\n\n"
-
-          for item in github_top:
-              gh_msg += (
-                  "📌 " + item["name"] + "\n"
-                  + "⭐ " + str(item["stars"]) + "\n"
-                  + "💻 " + item["language"] + "\n"
-                  + "📜 License: " + item["license"] + "\n"
-                  + "📅 " + item["date"] + "\n"
-                  + item["description"][:200] + "\n"
-                  + item["url"] + "\n\n"
-              )
-
-          if not github_top:
-              gh_msg += "कोई Project नहीं मिला।\n"
-
-          messages.append(gh_msg)
-
-          hn_msg = "📰 HACKER NEWS\n\n"
-
-          for item in hn_top:
-              hn_msg += (
-                  "🔹 " + item["title"] + "\n"
-                  + "⬆️ Points: " + str(item["points"])
-                  + " | 💬 " + str(item["comments"]) + "\n"
-                  + item["url"] + "\n"
-                  + "Discussion: " + item["discussion"] + "\n\n"
-              )
-
-          if not hn_top:
-              hn_msg += "कोई चर्चा नहीं मिली।\n"
-
-          messages.append(hn_msg)
-
+          if gh_top:
+              m="🛠 GITHUB PROJECTS — Top by stars (not a safety ranking)\n\n"
+              for r in gh_top:
+                  m += ("📌 " + r["name"] + " | ⭐ " + str(r["stars"]) + "\n📅 " + r["date"] + " | " + r["lang"] + " | License: " + r["license"] + "\n"
+                        + clean(r["desc"])[:230] + "\n" + r["hw_doc"][:350] + "\n" + ram_hint(r["name"]+" "+r["desc"]) + "\n🔗 " + r["url"] + "\n\n")
+              messages.append(m)
+          if hn_top:
+              m="📰 HACKER NEWS — Top by points\n\n"
+              for r in hn_top:
+                  m += ("🔹 " + clean(r["title"])[:220] + "\n⬆️ " + str(r["points"]) + " | 💬 " + str(r["comments"]) + "\n🔗 " + r["url"] + "\nDiscussion: " + r["discussion"] + "\n\n")
+              messages.append(m)
+          for category, entries in rss.items():
+              if not entries: continue
+              m=category + " — RSS SEARCH LEADS (verify before acting)\n\n"
+              for item in entries[:4]:
+                  m += ("🔸 " + clean(item["title"])[:230] + "\n📅 " + (item["date"] or "Date not provided") + "\n🔗 " + item["url"] + "\n\n")
+              messages.append(m)
           if errors:
-              error_msg = "⚠️ SOURCE ERRORS\n\n"
+              m="⚠️ SOURCE ERRORS (other sources may still have worked)\n\n"
+              for e in errors[:8]: m += "• " + e + "\n"
+              messages.append(m)
+          messages.append("⚠️ Safety: Airdrop/earning headlines are NOT proof of rewards or income. Never pay to claim, share seed phrase, install unknown APKs, or approve suspicious wallet permissions. Social platform data (X/Facebook/Instagram) may be unavailable without login/API; this report uses public search leads only.")
 
-              for error in errors[:5]:
-                  error_msg += error + "\n"
-
-              messages.append(error_msg)
-
-          messages.append(
-              "⚠️ Stars/Points भरोसे का प्रमाण नहीं हैं। "
-              "Free, सुरक्षा और Hardware की जाँच जरूरी है।"
-          )
-
-          telegram_url = "https://api.telegram.org/bot" + token + "/sendMessage"
-
-          for message in messages:
-              payload = json.dumps({
-                  "chat_id": chat,
-                  "text": message[:3900]
-              }).encode()
-
-              req = urllib.request.Request(
-                  telegram_url,
-                  data=payload,
-                  headers={"Content-Type": "application/json"}
-              )
-
-              response = urllib.request.urlopen(req, timeout=30)
-              print(response.read().decode())
-
-          print("Opportunity Radar completed successfully.")
+          # Split at paragraph boundaries to stay under Telegram's message size limit.
+          def send(text):
+              chunks=[]; current=""
+              for para in text.split("\n\n"):
+                  piece=para+"\n\n"
+                  if len(current)+len(piece)>3600 and current:
+                      chunks.append(current); current=piece
+                  else: current += piece
+                  if len(current)>3600:
+                      chunks.append(current[:3600]); current=current[3600:]
+              if current.strip(): chunks.append(current)
+              for chunk in chunks:
+                  payload=json.dumps({"chat_id":CHAT,"text":chunk}).encode()
+                  req=urllib.request.Request("https://api.telegram.org/bot"+TOKEN+"/sendMessage",data=payload,headers={"Content-Type":"application/json"})
+                  response=json.loads(urllib.request.urlopen(req,timeout=30).read())
+                  if not response.get("ok"): raise RuntimeError("Telegram send failed")
+                  time.sleep(0.4)
+          for msg in messages: send(msg)
+          print("Radar finished. GitHub:",len(gh),"HN:",len(hn),"RSS leads:",total_rss,"Errors:",len(errors))
           PY
