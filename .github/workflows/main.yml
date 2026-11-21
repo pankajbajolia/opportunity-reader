@@ -1,3 +1,4 @@
+
 name: Opportunity Radar
 
 'on':
@@ -5,12 +6,15 @@ name: Opportunity Radar
   schedule:
     - cron: "0 */4 * * *"
 
+permissions:
+  contents: read
+
 jobs:
   radar:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test Telegram connection
+      - name: Search Opportunities
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -19,28 +23,203 @@ jobs:
           import os
           import json
           import urllib.request
+          import urllib.parse
+          import datetime
 
-          token = os.environ.get("BOT_TOKEN")
-          chat = os.environ.get("CHAT_ID")
+          token = os.environ["BOT_TOKEN"]
+          chat = os.environ["CHAT_ID"]
 
-          if not token or not chat:
-              raise Exception("Telegram secrets missing")
+          today = datetime.date.today()
+          start = today - datetime.timedelta(days=14)
 
-          message = "✅ Opportunity Radar Workflow चालू है।"
+          github_results = {}
+          hn_results = {}
+          errors = []
 
-          url = f"https://api.telegram.org/bot{token}/sendMessage"
+          github_queries = [
+              "AI video tools",
+              "AI video clipping",
+              "AI automation",
+              "open source AI agent",
+              "AI cartoon video"
+          ]
 
-          data = json.dumps({
-              "chat_id": chat,
-              "text": message
-          }).encode()
+          for query in github_queries:
+              search = query + " created:" + str(start) + ".." + str(today)
 
-          req = urllib.request.Request(
-              url,
-              data=data,
-              headers={"Content-Type": "application/json"}
+              url = "https://api.github.com/search/repositories?q=" + urllib.parse.quote(search) + "&sort=stars&order=desc&per_page=5"
+
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "OpportunityRadar"}
+              )
+
+              try:
+                  data = json.loads(
+                      urllib.request.urlopen(req, timeout=25).read()
+                  )
+
+                  for item in data.get("items", []):
+                      link = item["html_url"]
+
+                      github_results[link] = {
+                          "name": item["full_name"],
+                          "stars": item["stargazers_count"],
+                          "description": item.get("description") or "No description",
+                          "url": link,
+                          "date": item.get("created_at", "")[:10],
+                          "language": item.get("language") or "Unknown",
+                          "license": (
+                              item["license"]["spdx_id"]
+                              if item.get("license")
+                              else "Unknown"
+                          )
+                      }
+
+              except Exception as e:
+                  errors.append("GitHub: " + str(e)[:150])
+
+          hn_queries = [
+              "AI video",
+              "AI tools",
+              "AI agent",
+              "open source AI",
+              "video clipping"
+          ]
+
+          start_ts = int(
+              datetime.datetime.combine(
+                  start,
+                  datetime.time()
+              ).timestamp()
           )
 
-          response = urllib.request.urlopen(req, timeout=30)
-          print(response.read().decode())
+          for query in hn_queries:
+              url = "https://hn.algolia.com/api/v1/search_by_date?" + urllib.parse.urlencode({
+                  "query": query,
+                  "tags": "story",
+                  "numericFilters": "created_at_i>" + str(start_ts),
+                  "hitsPerPage": 10
+              })
+
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "OpportunityRadar"}
+              )
+
+              try:
+                  data = json.loads(
+                      urllib.request.urlopen(req, timeout=25).read()
+                  )
+
+                  for item in data.get("hits", []):
+                      title = item.get("title") or ""
+
+                      if not title:
+                          continue
+
+                      link = item.get("url") or (
+                          "https://news.ycombinator.com/item?id="
+                          + item["objectID"]
+                      )
+
+                      hn_results[item["objectID"]] = {
+                          "title": title,
+                          "points": item.get("points") or 0,
+                          "comments": item.get("num_comments") or 0,
+                          "url": link,
+                          "discussion": "https://news.ycombinator.com/item?id=" + item["objectID"]
+                      }
+
+              except Exception as e:
+                  errors.append("Hacker News: " + str(e)[:150])
+
+          github_top = sorted(
+              github_results.values(),
+              key=lambda x: x["stars"],
+              reverse=True
+          )[:8]
+
+          hn_top = sorted(
+              hn_results.values(),
+              key=lambda x: x["points"],
+              reverse=True
+          )[:8]
+
+          messages = []
+
+          summary = "🔎 OPPORTUNITY RADAR\n"
+          summary += "📅 " + str(today) + "\n"
+          summary += "🗓 पिछले 14 दिनों की खोज\n\n"
+          summary += "🛠 GitHub: " + str(len(github_results)) + " Projects मिले\n"
+          summary += "📰 Hacker News: " + str(len(hn_results)) + " Discussions मिली\n\n"
+          summary += "⭐ Top Sources की रिपोर्ट नीचे है।"
+
+          messages.append(summary)
+
+          gh_msg = "🛠 GITHUB PROJECTS\n\n"
+
+          for item in github_top:
+              gh_msg += (
+                  "📌 " + item["name"] + "\n"
+                  + "⭐ " + str(item["stars"]) + "\n"
+                  + "💻 " + item["language"] + "\n"
+                  + "📜 License: " + item["license"] + "\n"
+                  + "📅 " + item["date"] + "\n"
+                  + item["description"][:200] + "\n"
+                  + item["url"] + "\n\n"
+              )
+
+          if not github_top:
+              gh_msg += "कोई Project नहीं मिला।\n"
+
+          messages.append(gh_msg)
+
+          hn_msg = "📰 HACKER NEWS\n\n"
+
+          for item in hn_top:
+              hn_msg += (
+                  "🔹 " + item["title"] + "\n"
+                  + "⬆️ Points: " + str(item["points"])
+                  + " | 💬 " + str(item["comments"]) + "\n"
+                  + item["url"] + "\n"
+                  + "Discussion: " + item["discussion"] + "\n\n"
+              )
+
+          if not hn_top:
+              hn_msg += "कोई चर्चा नहीं मिली।\n"
+
+          messages.append(hn_msg)
+
+          if errors:
+              error_msg = "⚠️ SOURCE ERRORS\n\n"
+
+              for error in errors[:5]:
+                  error_msg += error + "\n"
+
+              messages.append(error_msg)
+
+          messages.append(
+              "⚠️ Stars/Points भरोसे का प्रमाण नहीं हैं। "
+              "Free, सुरक्षा और Hardware की जाँच जरूरी है।"
+          )
+
+          telegram_url = "https://api.telegram.org/bot" + token + "/sendMessage"
+
+          for message in messages:
+              payload = json.dumps({
+                  "chat_id": chat,
+                  "text": message[:3900]
+              }).encode()
+
+              req = urllib.request.Request(
+                  telegram_url,
+                  data=payload,
+                  headers={"Content-Type": "application/json"}
+              )
+
+              response = urllib.request.urlopen(req, timeout=30)
+              print(response.read().decode())
+
+          print("Opportunity Radar completed successfully.")
           PY
